@@ -19,14 +19,19 @@ class Model(tf.keras.Model):
         super(Model, self).__init__()
 
         # TODO: Initialize hyperparameters
-        self.raw_features = None
-        self.num_classes = None
-        self.learning_rate = 1e-4
-        self.hidden_size = None
-        self.batch_size = None
+        self.raw_features = 119
+        self.num_classes = 2
+        self.learning_rate = .0001
+        self.hidden_size = 300
+        self.batch_size = 10
 
         # TODO: Initialize trainable parameters
-
+        self.lifting = tf.keras.layers.Dense(self.hidden_size)
+        self.mp1 = MPLayer(self.hidden_size, self.hidden_size)
+        self.mp2 = MPLayer(self.hidden_size, self.hidden_size)
+        self.mp3 = MPLayer(self.hidden_size, self.hidden_size)
+        self.read = tf.keras.layers.Dense(self.num_classes)
+        
     def call(self, g, is_testing=False):
         """
         Computes the forward pass of your network.
@@ -38,8 +43,12 @@ class Model(tf.keras.Model):
         :param g: The DGL graph you wish to run inference on.
         :return: logits tensor of size (batch_size, 2)
         """
-        # TODO: Fill this in!
-        return None
+        g.ndata['node_feats'] = self.lifting(g.ndata['node_feats'])
+        self.mp1(g)
+        self.mp2(g)
+        self.mp3(g)
+        logits = self.readout(g, g.ndata['node_feats'])
+        return logits
 
     def readout(self, g, node_feats):
         """
@@ -53,7 +62,9 @@ class Model(tf.keras.Model):
         """
         # TODO: Set the node features to be the output of your readout layer on
         # node_feats, then use dgl.sum_nodes to return logits.
-        return None
+        new_features = self.read(node_feats)
+        g.ndata['node_feats'] = new_features
+        return dgl.sum_nodes(g, 'node_feats')
 
     def accuracy_function(self, logits, labels):
         """
@@ -63,8 +74,8 @@ class Model(tf.keras.Model):
             (1 for if the molecule is active against cancer, else 0).
         :return: mean accuracy over batch.
         """
-        # TODO: Fill this in!
-        return None
+        correct_predictions = tf.equal(tf.argmax(logits, 1), labels)
+        return tf.reduce_mean(tf.cast(correct_predictions, tf.float32))
 
 
 class MPLayer(Layer):
@@ -86,6 +97,8 @@ class MPLayer(Layer):
         """
         super(MPLayer, self).__init__()
         # TODO: Fill this in!
+        self.dense1 = tf.keras.layers.Dense(out_feats, activation='relu')
+        self.dense2 = tf.keras.layers.Dense(in_feats, activation='relu')
 
     def call(self, g, is_testing=False):
         """
@@ -113,6 +126,13 @@ class MPLayer(Layer):
         # The reduce function for testing
         reducer = lambda x: self.reduce(x, True) if is_testing else self.reduce(x)
         # TODO: Fill this in!
+        if is_testing:
+            custom_send_and_recv(g, messager, reducer)
+        else:
+            g.send_and_recv(g.edges(), messager, reducer)
+        
+        new_features = self.dense1(g.ndata['node_feats'])
+        g.ndata['node_feats'] = new_features
 
     def message(self, edges, is_testing=False):
         """
@@ -132,7 +152,11 @@ class MPLayer(Layer):
         :return: A dictionary from some 'msg' to all the messages
         computed for each edge.
         """
-        pass
+        if is_testing:
+            features = edges
+        else:
+            features = edges.src['node_feats']
+        return {"msg": self.dense2(features)}
 
     def reduce(self, nodes, is_testing=False):
         """
@@ -149,7 +173,11 @@ class MPLayer(Layer):
         :param is_testing: True if using custom send_and_recv, false if using DGL
         :return: A dictionary from 'node_feats' to the summed messages for each node.
         """
-        pass
+        if is_testing:
+            messages = nodes['msg']
+        else:
+            messages = nodes.mailbox['msg']
+        return {"node_feats": tf.math.reduce_sum(messages, axis=1)}
 
 
 def build_graph(molecule):
@@ -169,8 +197,21 @@ def build_graph(molecule):
     # TODO: Call the graph's add_edges method to add edges from src to dst and dst to src.
     #       Edges are directed in DGL, but undirected in a molecule, so you have
     #       to add them both ways.
-
-    return None
+    
+    g = dgl.DGLGraph()
+    
+    nodes = molecule.nodes
+    g.add_nodes(nodes.shape[0])
+    nodes = tf.convert_to_tensor(nodes, dtype=tf.float32)
+    g.ndata["node_feats"] = nodes
+    
+    edges = molecule.edges
+    src = tf.convert_to_tensor([i[0] for i in edges], dtype=tf.int64)
+    dst = tf.convert_to_tensor([i[1] for i in edges], dtype=tf.int64)
+    g.add_edges(src, dst)
+    g.add_edges(dst, src)
+    
+    return g
 
 
 def train(model, train_data):
@@ -193,7 +234,28 @@ def train(model, train_data):
     # This is the loss function, usage: loss(labels, logits)
     loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
     # TODO: Implement train with the docstring instructions
+        
+    num_molecules = len(train_data)
+    
+    optimizer = tf.keras.optimizers.Adam(model.learning_rate)
+    
+    for i in range(0, num_molecules, model.batch_size):
+        molecule_batch = train_data[i:i + model.batch_size]
+        graph_batch = []
+        labels = []
+        for m in molecule_batch:
+            graph_batch.append(build_graph(m))
+            labels.append(m.label)
+        batched = dgl.batch(graph_batch)
+        labels = tf.convert_to_tensor(labels, dtype=tf.float32)
+        
+        with tf.GradientTape() as tape:
+            logits = model.call(batched)
+            losses = loss(labels, logits)
 
+        gradients = tape.gradient(losses, model.trainable_variables)
+        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+        
 
 def test(model, test_data):
     """
@@ -207,15 +269,37 @@ def test(model, test_data):
     :return: total accuracy over the test set (between 0 and 1)
     """
     # TODO: Fill this in!
-    return None
+    num_molecules = len(test_data)
+    accuracy = 0.0
+    batches = 0.0
+    
+    for i in range(0, num_molecules, model.batch_size):
+        molecule_batch = test_data[i:i + model.batch_size]
+        graph_batch = []
+        labels = []
+        for m in molecule_batch:
+            graph_batch.append(build_graph(m))
+            labels.append(m.label)
+        batched = dgl.batch(graph_batch)
+        labels = np.array(labels)
+        
+        logits = model.call(batched)
+        accuracy += model.accuracy_function(logits.numpy(), labels)
+        batches += 1.0
+    
+    return accuracy/batches
 
 
 def main():
     # TODO: Return the training and testing data from get_data
     # TODO: Instantiate model
     # TODO: Train and test for up to 15 epochs.
-    pass
-
+    train_data, test_data = preprocess.get_data('data/1-balance.sdf')
+    model = Model()
+    
+    for i in range(10):
+        train(model, train_data)
+        print(test(model, test_data))
 
 if __name__ == '__main__':
     main()

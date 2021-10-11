@@ -40,8 +40,22 @@ def get_data(file_name, rd_seed=None):
     number_of_elements = 119
     
     # TODO: Read in the molecules file
-    # TODO: Convert each molecule's nodes (atoms) to a one-hot vector
-    # TODO: Call `seed(rd_seed)` and shuffle the molecules with `shuffle`
-    # TODO: Split the data into training and testing sets with test_fraction
+    molecules = read_file(file_name)
     
-    return None, None
+    # TODO: Convert each molecule's nodes (atoms) to a one-hot vector
+    for m in molecules:
+        one_hot = np.zeros((len(m.nodes), number_of_elements), dtype=np.float32)
+        one_hot[np.arange(len(m.nodes)), m.nodes] = 1.0
+        m.nodes = one_hot
+    
+    # TODO: Call `seed(rd_seed)` and shuffle the molecules with `shuffle`
+    seed(rd_seed)
+    shuffle(molecules)
+    
+    # TODO: Split the data into training and testing sets with test_fraction
+    train_data = molecules[0:int(len(molecules)*(1.0-test_fraction))]
+    test_data = molecules[int(len(molecules)*(1.0-test_fraction)):]
+    print(np.shape(train_data))
+    print(np.shape(test_data))
+    
+    return train_data, test_data

@@ -35,7 +35,31 @@ def custom_send_and_recv(g, message_func, reduce_func):
     # TODO: Extract the current node features
     # TODO: For each node, send its message
     # TODO: Set the new node features
-    pass
+    
+    d = lambda: ddict(d)
+    mailbox = d()
+    features = g.ndata['node_feats']
+    
+    for node in g.nodes():
+        key = node.numpy()
+        message = message_func(features[key])['msg']
+        
+        neighbors = g.successors(node.numpy()).numpy()
+        for n in neighbors:
+            if n in mailbox:
+                mailbox[n]['msg'].append(message)
+            else:
+                mailbox[n]['msg'] = [message]
+    
+    new_features = []
+    for node in g.nodes():
+        key = node.numpy()
+        mailbox[key]['msg'] = tf.convert_to_tensor(mailbox[key]['msg'], dtype=tf.float32)
+        mailbox[key]['msg'] = tf.expand_dims(mailbox[key]['msg'], 0) #reshape to (1, num_messages, message_size)
+        new_features.append(reduce_func(mailbox[key])['node_feats'])
+    new_features = tf.convert_to_tensor(new_features, dtype=tf.float32)
+    g.ndata["node_feats"] = tf.squeeze(new_features)
+    
 
 def run_tests():
     """
